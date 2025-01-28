@@ -1,107 +1,115 @@
 const fs = require('fs');
 const path = require('path');
 
-// Create directories recursively if they don't exist
-function createDirSync(dirPath) {
-    const dirs = dirPath.split(path.sep);
-    let currentPath = '';
-    dirs.forEach((dir) => {
-        currentPath = path.join(currentPath, dir);
-        if (!fs.existsSync(currentPath)) {
-            fs.mkdirSync(currentPath);
-        }
-    });
+
+function parseFileHeader(line) {
+  const trimmed = line.trimEnd();
+
+  // 1) "// File: ..."
+  if (trimmed.startsWith('// File:')) {
+    return trimmed.substring('// File:'.length).trim() || null;
+  }
+
+  // 2) "/* File: ... */"
+  if (trimmed.startsWith('/* File:')) {
+    let pathPart = trimmed.substring('/* File:'.length).trim();
+    if (pathPart.endsWith('*/')) {
+      pathPart = pathPart.slice(0, -2).trim();
+    }
+    return pathPart || null;
+  }
+
+  // Not a file header
+  return null;
 }
 
-// This function will parse a line that starts with either:
-//   "// File: relative/path.ext"
-// or
-//   "/* File: relative/path.ext */"
-// and extract the "relative/path.ext" portion.
-// We'll return null if it doesn't match those patterns.
-function parseFileHeader(line) {
-    // Trim right side, to ignore trailing spaces or \r
-    const trimmed = line.trimEnd();
-
-    // 1) Check if it starts with "// File:"
-    if (trimmed.startsWith('// File:')) {
-        // After "// File:" is the path
-        const pathPart = trimmed.substring('// File:'.length).trim();
-        return pathPart || null;
-    }
-
-    // 2) Check if it starts with "/* File:"
-    if (trimmed.startsWith('/* File:')) {
-        // After "/* File:" is the path
-        let pathPart = trimmed.substring('/* File:'.length).trim();
-
-        // If it ends with "*/", remove that
-        if (pathPart.endsWith('*/')) {
-            pathPart = pathPart.slice(0, -2).trim();
-        }
-        return pathPart || null;
-    }
-
-    // Not a header line
-    return null;
+/**
+ * sanitizePath:
+ *   Removes leading slashes or Windows drive letters (like "C:\") so we don't
+ *   accidentally try to create directories at the root of the system.
+ *   e.g. "/home/APEF/client/package.json" => "home/APEF/client/package.json"
+ *        "C:\Users\someuser\file.js"     => "Users/someuser/file.js"
+ */
+function sanitizePath(filePath) {
+  // Remove leading drive letters or slashes
+  // e.g., "C:\Users" or "/home/APEF"
+  return filePath.replace(/^([A-Za-z]:)?[\\/]+/, '');
 }
 
 /**
  * processOutputFile:
- *   Reads the aggregated text file line-by-line, detects file boundaries
- *   by lines that match our comment headers (// File: or /* File:),
- *   and recreates them on disk.
- *
- *   Importantly: the script keeps that header line as the first line
- *   in the file on disk (so the comment remains).
+ *   - Reads lines from the aggregated text file (e.g., "GardenPlanner.txt").
+ *   - Looks for lines that start with "// File:" or "/* File:" to detect each file's boundary.
+ *   - Places each restored file in a "restored-data" subfolder (next to the .txt file),
+ *     preserving the relative path segments if they exist, but stripping leading slashes.
  */
 function processOutputFile(inputFilePath) {
-    const fileContent = fs.readFileSync(inputFilePath, 'utf-8');
-    // Split on Windows or Unix line endings
-    const lines = fileContent.split(/\r?\n/);
+  // 1) Resolve the absolute path to the .txt file
+  const inputAbsolutePath = path.resolve(process.cwd(), inputFilePath);
+  // 2) The base directory where the .txt file sits
+  const baseDir = path.dirname(inputAbsolutePath);
+  // 3) The "restored-data" folder we’ll create inside baseDir
+  const restoreRoot = path.join(baseDir, 'restored-data');
 
-    let currentFilePath = null;
-    let currentFileLines = [];
+  // Ensure "restored-data" exists
+  fs.mkdirSync(restoreRoot, { recursive: true });
 
-    // Writes the accumulated lines to disk
-    function writeCurrentFile() {
-        if (currentFilePath && currentFileLines.length > 0) {
-            const fullFilePath = path.join(process.cwd(), currentFilePath);
-            const dirPath = path.dirname(fullFilePath);
+  // Read all lines from the .txt
+  const fileLines = fs.readFileSync(inputAbsolutePath, 'utf-8').split(/\r?\n/);
 
-            createDirSync(dirPath);
+  let currentFileHeaderPath = null;
+  let currentFileLines = [];
 
-            // Join the lines with '\n' so the final file has consistent line endings
-            fs.writeFileSync(fullFilePath, currentFileLines.join('\n'), 'utf-8');
-        }
+  // Helper: write the current file to disk
+  function writeCurrentFile() {
+    if (currentFileHeaderPath && currentFileLines.length > 0) {
+      // 1) Sanitize the path to remove leading slashes, etc.
+      const sanitized = sanitizePath(currentFileHeaderPath);
+      if (!sanitized) {
+        // If there's nothing left, skip writing.
+        // Or handle it differently if you want a default name.
+        return;
+      }
+
+      // 2) Join "restored-data" + sanitized path
+      const fullFilePath = path.join(restoreRoot, sanitized);
+      const dirPath = path.dirname(fullFilePath);
+
+      // 3) Recursively create subfolders
+      fs.mkdirSync(dirPath, { recursive: true });
+
+      // 4) Write the file content
+      fs.writeFileSync(fullFilePath, currentFileLines.join('\n'), 'utf-8');
+      // Optional: console.log(`Wrote file: ${fullFilePath}`);
     }
+  }
 
-    for (const line of lines) {
-        const maybePath = parseFileHeader(line);
+  for (const line of fileLines) {
+    const maybeHeaderPath = parseFileHeader(line);
 
-        if (maybePath !== null) {
-            // We found a new file header -> finalize the previous file
-            writeCurrentFile();
+    if (maybeHeaderPath !== null) {
+      // Finalize the previous file, if any
+      writeCurrentFile();
 
-            // Start a new file
-            currentFilePath = maybePath;
-            currentFileLines = [line]; // keep the header line in the file
-        } else {
-            // It's just a line of content for the current file
-            if (currentFilePath) {
-                currentFileLines.push(line);
-            }
-        }
+      // Start a new file
+      currentFileHeaderPath = maybeHeaderPath;
+      currentFileLines = [line]; // keep the header line as the first line
+    } else {
+      // Not a new file boundary -> add to the current file
+      if (currentFileHeaderPath) {
+        currentFileLines.push(line);
+      }
     }
+  }
 
-    // Finalize the last file
-    writeCurrentFile();
+  // Write the last file
+  writeCurrentFile();
 }
 
-// Usage
+// CLI usage
 if (process.argv.length < 3) {
-    console.log("Usage: node restoreFolderStructure.js <output file path>");
-    process.exit(1);
+  console.log("Usage: node restoreFolderStructure.js <output file path>");
+  process.exit(1);
 }
 
 const inputFilePath = process.argv[2];
