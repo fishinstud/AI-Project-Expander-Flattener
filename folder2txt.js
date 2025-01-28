@@ -4,7 +4,7 @@ const path = require('path');
 const MAX_FILES = 1000;
 
 const i18n = require('./i18n.json');
-const ignoreConfig = require('/home/folder2txt-master/folder2txt-master/ignore.json');
+const ignoreConfig = require('./ignore.json');
 
 /**
  * matchWildcard:
