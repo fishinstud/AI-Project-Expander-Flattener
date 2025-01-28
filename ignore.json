@@ -1,0 +1,27 @@
+{
+  "folders": [
+    "node_modules",
+    "ignore-json-examples",
+    ".git",
+    "build",
+    "husky",
+    "cache",
+    "fonts",
+    "images",
+    "chunks",
+    "media",
+    "favicon.ico",
+    "static",
+    "storybook-static",
+    ".next"
+  ],
+  "files": [
+    ".DS_Store",
+    "package-lock.json",
+    ".gitignore",
+    ".env",
+    ".gitignore",
+    "favicon.ico",
+    "readme.md"
+  ]
+}

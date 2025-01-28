@@ -1,0 +1,11 @@
+{
+  "name": "AI-Assistant-Expander-Flattener",
+  "version": "69.420",
+  "description": "helps AI remember what your working on by flattening a project into a consise file",
+  "main": "index.js",
+  "scripts": {
+    "test": "echo \"Error: no test specified\" && exit 1"
+  },
+  "author": "Christopher Jacobson",
+  "license": "ISC"
+}
