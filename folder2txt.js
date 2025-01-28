@@ -4,16 +4,16 @@ const path = require('path');
 const MAX_FILES = 1000;
 
 const i18n = require('./i18n.json');
-const ignoreConfig = require('./ignore.json');
+const ignoreConfig = require('/home/folder2txt-master/folder2txt-master/ignore.json');
 
 /**
  * matchWildcard:
  *   Returns true if `str` matches the given shell-style wildcard `pattern`.
  */
 function matchWildcard(str, pattern) {
-    const escapeRegex = (string) => string.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
-    const regexPattern = '^' + pattern.split('*').map(escapeRegex).join('.*') + '$';
-    return new RegExp(regexPattern).test(str);
+  const escapeRegex = (string) => string.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+  const regexPattern = '^' + pattern.split('*').map(escapeRegex).join('.*') + '$';
+  return new RegExp(regexPattern).test(str);
 }
 
 /**
@@ -22,19 +22,19 @@ function matchWildcard(str, pattern) {
  *   based on the patterns in ignore.json.
  */
 function shouldIgnore(filePath, isFolder = false) {
-    const folderSeparator = filePath.includes('/') ? '/' : '\\';
-    const fileOrFolderName = filePath.split(folderSeparator).at(-1);
-    const { folders, files } = ignoreConfig;
+  const folderSeparator = filePath.includes('/') ? '/' : '\\';
+  const fileOrFolderName = filePath.split(folderSeparator).at(-1);
+  const { folders, files } = ignoreConfig;
 
-    if (isFolder) {
-        return folders.some(folderPattern =>
-            folderPattern === fileOrFolderName || matchWildcard(fileOrFolderName, folderPattern)
-        );
-    } else {
-        return files.some(filePattern =>
-            filePattern === fileOrFolderName || matchWildcard(fileOrFolderName, filePattern)
-        );
-    }
+  if (isFolder) {
+    return folders.some(folderPattern =>
+      folderPattern === fileOrFolderName || matchWildcard(fileOrFolderName, folderPattern)
+    );
+  } else {
+    return files.some(filePattern =>
+      filePattern === fileOrFolderName || matchWildcard(fileOrFolderName, filePattern)
+    );
+  }
 }
 
 /**
@@ -43,39 +43,52 @@ function shouldIgnore(filePath, isFolder = false) {
  *   If the total count surpasses MAX_FILES, returns Infinity.
  */
 function countFiles(folderPath) {
-    let count = 0;
-    const files = fs.readdirSync(folderPath);
-    for (let file of files) {
-        const filePath = path.join(folderPath, file);
-        const stats = fs.statSync(filePath);
-        if (stats.isFile() && !shouldIgnore(filePath, true)) {
-            count++;
-        } else if (stats.isDirectory() && !shouldIgnore(filePath, true)) {
-            count += countFiles(filePath);
-        }
-        if (count > MAX_FILES) {
-            return Infinity;
-        }
+  let count = 0;
+  const files = fs.readdirSync(folderPath);
+  for (let file of files) {
+    const filePath = path.join(folderPath, file);
+    const stats = fs.statSync(filePath);
+    if (stats.isFile() && !shouldIgnore(filePath, true)) {
+      count++;
+    } else if (stats.isDirectory() && !shouldIgnore(filePath, true)) {
+      count += countFiles(filePath);
     }
-    return count;
+    if (count > MAX_FILES) {
+      return Infinity;
+    }
+  }
+  return count;
 }
 
+/**
+ * getCommentHeader:
+ *   Returns the appropriate comment style header based on file extension.
+ *
+ *   NOTE: We now treat `.json` specifically with a line-style comment:
+ *     // File: ...
+ *   instead of the block-style comment for CSS.
+ */
 function getCommentHeader(relativePath) {
-    const ext = path.extname(relativePath).toLowerCase();
+  const ext = path.extname(relativePath).toLowerCase();
 
-    // Common CSS-like extensions (including JSON for block-style comment)
-    const blockCommentExts = ['.css', '.scss', '.sass', '.json'];
-    // Common JS/Java-like extensions
-    const slashLike = ['.js', '.ts', '.java', '.jsx', '.tsx'];
+  // For .json, explicitly use line-style comment
+  if (ext === '.json') {
+    return `// File: ${relativePath}\n`;
+  }
 
-    if (blockCommentExts.includes(ext)) {
-        return `/* File: ${relativePath} */\n`;
-    } else if (slashLike.includes(ext)) {
-        return `// File: ${relativePath}\n`;
-    } else {
-        // Fallback to // for everything else
-        return `// File: ${relativePath}\n`;
-    }
+  // Common CSS-like extensions (excluding .json now)
+  const blockCommentExts = ['.css', '.scss', '.sass'];
+  // Common JS/Java-like extensions
+  const slashLike = ['.js', '.ts', '.java', '.jsx', '.tsx'];
+
+  if (blockCommentExts.includes(ext)) {
+    return `/* File: ${relativePath} */\n`;
+  } else if (slashLike.includes(ext)) {
+    return `// File: ${relativePath}\n`;
+  } else {
+    // Fallback
+    return `// File: ${relativePath}\n`;
+  }
 }
 
 /**
@@ -83,73 +96,67 @@ function getCommentHeader(relativePath) {
  *   Returns true if the file's first line starts with "// File:" or "/* File:".
  */
 function alreadyHasHeader(content) {
-    // Split out just the first line; handle Windows or Unix line endings
-    const [firstLine] = content.split(/\r?\n/);
-    if (!firstLine) return false;
+  const [firstLine] = content.split(/\r?\n/);
+  if (!firstLine) return false;
 
-    const trimmed = firstLine.trimStart();
-    return trimmed.startsWith('// File:') || trimmed.startsWith('/* File:');
+  const trimmed = firstLine.trimStart();
+  return trimmed.startsWith('// File:') || trimmed.startsWith('/* File:');
 }
 
 /**
  * processFolder:
- *   Main function. Recursively reads folderPath, ignoring files as needed,
- *   writes them to outputPath with a comment header as the first line of each file
- *   IF the file does not already begin with such a header.
+ *   Recursively reads `folderPath`, ignoring files per ignore.json,
+ *   and writes their contents into `outputPath`. Each file has a one-line
+ *   comment header indicating the path, unless it already starts with that header.
  */
 function processFolder({ folderPath, outputPath, lang = 'en' }) {
-    const filesCount = countFiles(folderPath);
-    if (filesCount > MAX_FILES) {
-        console.log(`(${filesCount}) ${i18n[lang]['The number of files exceeds the limit of']} ${MAX_FILES}`);
-        return;
+  const filesCount = countFiles(folderPath);
+  if (filesCount > MAX_FILES) {
+    console.log(`(${filesCount}) ${i18n[lang]['The number of files exceeds the limit of']} ${MAX_FILES}`);
+    return;
+  }
+
+  // Create directories for outputPath if needed
+  const outputDir = path.dirname(outputPath);
+  fs.mkdirSync(outputDir, { recursive: true });
+
+  console.log(`${i18n[lang]['Starting writing output file']} ${outputPath}`);
+  const output = fs.createWriteStream(outputPath);
+
+  function processFile(filePath) {
+    console.log(`${i18n[lang]['Writing file']} ${filePath}`);
+    const relativePath = path.relative(process.cwd(), filePath);
+    const fileContents = fs.readFileSync(filePath, 'utf-8');
+
+    if (!alreadyHasHeader(fileContents)) {
+      output.write(getCommentHeader(relativePath));
     }
+    output.write(fileContents);
+    output.write('\n'); // separate files
+  }
 
-    console.log(`${i18n[lang]['Starting writing output file']} ${outputPath}`);
-    const output = fs.createWriteStream(outputPath);
+  function processFolderRecursive(folderPath) {
+    const files = fs.readdirSync(folderPath);
+    files.forEach(file => {
+      const filePath = path.join(folderPath, file);
+      const stats = fs.statSync(filePath);
+      if (stats.isFile() && !shouldIgnore(filePath)) {
+        processFile(filePath);
+      } else if (stats.isDirectory() && !shouldIgnore(filePath, true)) {
+        processFolderRecursive(filePath);
+      }
+    });
+  }
 
-    // Writes a single file’s (optional) header + content to the output
-    function processFile(filePath) {
-        console.log(`${i18n[lang]['Writing file']} ${filePath}`);
-        const relativePath = path.relative(process.cwd(), filePath);
-        const fileContents = fs.readFileSync(filePath, 'utf-8');
-
-        // Check if the file already starts with a // File: or /* File:
-        if (!alreadyHasHeader(fileContents)) {
-            // If not, write a new header line
-            output.write(getCommentHeader(relativePath));
-        }
-
-        // Then write the file content
-        output.write(fileContents);
-        // Add a newline at the end to separate from the next file
-        output.write('\n');
-    }
-
-    // Recursively traverse the folder
-    function processFolderRecursive(folderPath) {
-        const files = fs.readdirSync(folderPath);
-        files.forEach(file => {
-            const filePath = path.join(folderPath, file);
-            const stats = fs.statSync(filePath);
-            if (stats.isFile() && !shouldIgnore(filePath)) {
-                processFile(filePath);
-            } else if (stats.isDirectory() && !shouldIgnore(filePath, true)) {
-                processFolderRecursive(filePath);
-            }
-        });
-    }
-
-    // Start recursive processing
-    processFolderRecursive(folderPath);
-
-    output.end();
-    console.log(`${i18n[lang]['Finished writing output file']} ${outputPath}`);
+  processFolderRecursive(folderPath);
+  output.end();
+  console.log(`${i18n[lang]['Finished writing output file']} ${outputPath}`);
 }
 
-// Read CLI args
+// CLI args
 if (process.argv.length < 3) {
-    console.log(`${i18n['en']['Usage']}`);
-    process.exit(1);
+  console.log(`${i18n['en']['Usage']}`);
+  process.exit(1);
 }
 
 const folderPath = process.argv.find(arg => arg.startsWith('folder=')).split('=')[1];
