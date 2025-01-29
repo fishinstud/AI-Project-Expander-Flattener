@@ -62,23 +62,27 @@ function countFiles(folderPath) {
 
 /**
  * getCommentHeader:
- *   Returns the appropriate comment style header based on file extension.
+ *   Returns a comment-style header based on file extension. It now includes a case for
+ *   `-- File:` (commonly used in SQL or other contexts).
  *
- *   NOTE: We now treat `.json` specifically with a line-style comment:
- *     // File: ...
- *   instead of the block-style comment for CSS.
+ *   You can modify which file extensions use this new `-- File:` marker or make it default
+ *   for certain scenarios. For example, if ext is '.sql', we use `-- File: ...`.
+ *   Otherwise, we use the existing logic for .json, .css, .js, etc.
  */
 function getCommentHeader(relativePath) {
   const ext = path.extname(relativePath).toLowerCase();
 
-  // For .json, explicitly use line-style comment
+  // Example: use `-- File:` for SQL files
+  if (ext === '.sql') {
+    return `-- File: ${relativePath}\n`;
+  }
+
+  // .json => line-style comment (// File:)
   if (ext === '.json') {
     return `// File: ${relativePath}\n`;
   }
 
-  // Common CSS-like extensions (excluding .json now)
   const blockCommentExts = ['.css', '.scss', '.sass'];
-  // Common JS/Java-like extensions
   const slashLike = ['.js', '.ts', '.java', '.jsx', '.tsx'];
 
   if (blockCommentExts.includes(ext)) {
@@ -86,21 +90,25 @@ function getCommentHeader(relativePath) {
   } else if (slashLike.includes(ext)) {
     return `// File: ${relativePath}\n`;
   } else {
-    // Fallback
+    // Fallback to line-style or you can choose `-- File:` here if you want
     return `// File: ${relativePath}\n`;
   }
 }
 
 /**
  * alreadyHasHeader:
- *   Returns true if the file's first line starts with "// File:" or "/* File:".
+ *   Returns true if the file's first line starts with "// File:", "/* File:", or "-- File:".
  */
 function alreadyHasHeader(content) {
   const [firstLine] = content.split(/\r?\n/);
   if (!firstLine) return false;
 
   const trimmed = firstLine.trimStart();
-  return trimmed.startsWith('// File:') || trimmed.startsWith('/* File:');
+  return (
+    trimmed.startsWith('// File:') ||
+    trimmed.startsWith('/* File:') ||
+    trimmed.startsWith('-- File:')
+  );
 }
 
 /**
