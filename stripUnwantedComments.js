@@ -2,104 +2,122 @@
 /* eslint-env node */
 "use strict";
 
+/**
+ * stripUnwantedComments.js ─ cleans text-dumps before minification.
+ *
+ *   node stripUnwantedComments.js input.txt output.txt
+ */
+
 const fs   = require("fs");
 const path = require("path");
 
-/* ─────────────────────────────────────────────────────────────── */
-/*   Utility: Clean up ChatGPT artefacts                           */
-/* ─────────────────────────────────────────────────────────────── */
-function cleanArtifacts(text) {
-  return text
-    // Strip BOM
-    .replace(/^\uFEFF/, "")
-    // Remove zero-width chars
-    .replace(/[\u200B-\u200D\u2060]+/g, "")
-    // Replace curly quotes
-    .replace(/[“”]/g, '"')
-    .replace(/[‘’]/g, "'");
+/* ─────────────────────────  ChatGPT artefacts  ───────────────────────── */
+function cleanArtifacts(txt) {
+  return txt
+    .replace(/^\uFEFF/, "")                      // BOM
+    .replace(/[\u200B-\u200D\u2060]+/g, "")      // zero-width
+    .replace(/[“”]/g, '"').replace(/[‘’]/g, "'"); // curly quotes
 }
 
-/** Remove wrapping ``` fences (if the *whole* file is fenced) */
-function stripCodeFence(text) {
-  const trimmed = text.trim();
-  if (!trimmed.startsWith("```")) return text;
-
-  const lines = trimmed.split(/\r?\n/);
-  // drop the opening line (``` or ```lang)
+function stripCodeFence(txt) {
+  const t = txt.trim();
+  if (!t.startsWith("```")) return txt;
+  const lines = t.split(/\r?\n/);
   lines.shift();
-  // drop the last ```` line if present
-  if (lines.length && /^```/.test(lines[lines.length - 1].trim())) lines.pop();
+  if (lines.length && /^```/.test(lines.at(-1).trim())) lines.pop();
   return lines.join("\n");
 }
 
-/* ─────────────────────────────────────────────────────────────── */
-/*   Regexes                                                       */
-/* ─────────────────────────────────────────────────────────────── */
-const recognizedSeparators = [
-  /^\s*\/\/\s*File:\s*\S+/,             // // File:
-  /^\s*\/\*\s*File:\s*\S+.*\*\/\s*$/,   // /* File: … */
-  /^\s*--\s*File:\s*\S+/,               // -- File:
-  /^\s*#\s*File:\s*\S+/,                // # File:
-  /^\s*<!--\s*File:\s*\S+.*-->\s*$/     // <!-- File: … -->
+/* ─────────────────────────────  Regexes  ─────────────────────────────── */
+const recognisedSeparators = [
+  /^\s*\/\/\s*File:\s*\S+/,
+  /^\s*\/\*\s*File:\s*\S+.*\*\/\s*$/,
+  /^\s*--\s*File:\s*\S+/,
+  /^\s*#\s*File:\s*\S+/,
+  /^\s*<!--\s*File:\s*\S+.*-->\s*$/
 ];
 
-function isRecognizedSeparator(line) {
-  return recognizedSeparators.some((re) => re.test(line));
-}
+const oneLineBlockCmt = /^\s*(?:\/\*.*\*\/|<!--.*-->)/;
 
-/** Detect *any* comment prefix we care about                       */
-function isCommentLine(line) {
-  const t = line.trimStart();
+/* any comment prefix on a **single** line                                 */
+function isCommentLine(l) {
+  const t = l.trimStart();
   return (
-    t.startsWith("//")  ||
-    t.startsWith("/*")  ||
-    t.startsWith("--")  ||
-    t.startsWith("#")   ||
-    t.startsWith("<!--")
+    t.startsWith("//")   ||
+    t.startsWith("/*")   ||
+    t.startsWith("--")   ||
+    t.startsWith("#")    ||
+    t.startsWith("<!--") ||
+    t.startsWith("*")    ||   // inside block banners
+    t.startsWith("*/")
   );
 }
 
-/* ─────────────────────────────────────────────────────────────── */
-/*   Core                                                          */
-/* ─────────────────────────────────────────────────────────────── */
+function isRecognisedSeparator(l) {
+  return recognisedSeparators.some((re) => re.test(l));
+}
+
+/* ──────────────────────────────  Core  ──────────────────────────────── */
 function stripUnwantedComments(inputFile, outputFile) {
-  let content = fs.readFileSync(inputFile, "utf8");
-  content     = stripCodeFence(cleanArtifacts(content))
-                // normalise CRLF → LF
-                .replace(/\r\n/g, "\n");
+  let src = fs.readFileSync(inputFile, "utf8");
+  src     = stripCodeFence(cleanArtifacts(src)).replace(/\r\n/g, "\n");
 
-  const lines        = content.split("\n");
-  const resultLines  = [];
-  let   blankStreak  = 0;
+  const out      = [];
+  let   blanks   = 0;
+  let   inBlock  = false;          // inside unwanted /* … */ or <!-- … -->
 
-  for (let ln of lines) {
-    // ignore comment lines that are *not* recognised separators
-    if (isCommentLine(ln) && !isRecognizedSeparator(ln)) continue;
+  for (const raw of src.split("\n")) {
+    const line = raw;             // keep original for separator test
+    const trim = line.trim();
 
-    const trimmed = ln.trim();
-
-    if (trimmed === "") {
-      blankStreak++;
-      if (blankStreak > 1) continue;   // skip extra blanks
-    } else {
-      blankStreak = 0;
+    /* ── exit block? ─────────────────────────────────────────────── */
+    if (inBlock) {
+      if (/.*\*\/\s*$/.test(trim) || /.*-->\s*$/.test(trim)) inBlock = false;
+      continue; // skip everything inside
     }
-    resultLines.push(trimmed);
+
+    /* ── recognised “File:” separator → keep verbatim ───────────── */
+    if (isRecognisedSeparator(trim)) {
+      out.push(trim);
+      blanks = 0;
+      continue;
+    }
+
+    /* ── multi-line comment open? ───────────────────────────────── */
+    if ((trim.startsWith("/*")  && !isRecognisedSeparator(trim)) ||
+        (trim.startsWith("<!--") && !isRecognisedSeparator(trim))) {
+      if (!/.*\*\/\s*$/.test(trim) && !/.*-->\s*$/.test(trim)) {
+        inBlock = true;           // enter long block
+      }
+      continue;                   // skip opener line
+    }
+
+    /* ── one-liner block comments ───────────────────────────────── */
+    if (oneLineBlockCmt.test(trim) && !isRecognisedSeparator(trim)) continue;
+
+    /* ── single-line comments we don’t want ─────────────────────── */
+    if (isCommentLine(trim) && !isRecognisedSeparator(trim)) continue;
+
+    /* ── blank-line collapse ────────────────────────────────────── */
+    if (trim === "") {
+      if (++blanks > 1) continue;
+    } else {
+      blanks = 0;
+    }
+
+    out.push(trim);
   }
 
-  // Ensure file ends with a single newline
-  const output = resultLines.join("\n") + "\n";
-  fs.writeFileSync(outputFile, output, "utf8");
+  const result = out.join("\n") + "\n";
+  fs.writeFileSync(outputFile, result, "utf8");
   console.log(`Done! Wrote cleaned content to ${outputFile}`);
 }
 
-/* ─────────────────────────────────────────────────────────────── */
-/*   CLI                                                           */
-/* ─────────────────────────────────────────────────────────────── */
+/* ──────────────────────────────  CLI  ──────────────────────────────── */
 if (process.argv.length < 4) {
   console.error("Usage: node stripUnwantedComments.js <inputFile> <outputFile>");
   process.exit(1);
 }
 
-const [inputFile, outputFile] = process.argv.slice(2).map((p) => path.resolve(process.cwd(), p));
-stripUnwantedComments(inputFile, outputFile);
+const [inFile, outFile] = process.argv.slice(2).map((p) => path.resolve(process.cwd(), p));
+stripUnwantedComments(inFile, outFile);
