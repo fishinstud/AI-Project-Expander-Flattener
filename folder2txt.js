@@ -1,174 +1,198 @@
-const fs = require('fs');
-const path = require('path');
+// File: folder2txt.js
+/* eslint-env node */
+"use strict";
+
+const fs   = require("fs");
+const path = require("path");
 
 const MAX_FILES = 1000;
 
-const i18n = require('./i18n.json');
-const ignoreConfig = require('./ignore.json');
+/* ------------------------------------------------------------------ */
+/*  Load configs – fall back gracefully if they live next to this file */
+/* ------------------------------------------------------------------ */
+const CWD            = process.cwd();
+const SCRIPT_DIR     = path.dirname(__filename);
+const requireFromCwd = (p) => require(path.isAbsolute(p) ? p : path.join(CWD, p));
 
-/**
- * matchWildcard:
- *   Returns true if `str` matches the given shell-style wildcard `pattern`.
- */
+const i18n         = requireFromCwd("./i18n.json");
+const ignoreConfig = requireFromCwd("./ignore.json");
+
+/* ------------------------------------------------------------------ */
+/*  Helpers                                                           */
+/* ------------------------------------------------------------------ */
+
+/** shell-style wildcard test ( * only )                                          */
 function matchWildcard(str, pattern) {
-  const escapeRegex = (string) => string.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
-  const regexPattern = '^' + pattern.split('*').map(escapeRegex).join('.*') + '$';
-  return new RegExp(regexPattern).test(str);
+  const escape = (s) => s.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+  const regex  = new RegExp(`^${pattern.split("*").map(escape).join(".*")}$`);
+  return regex.test(str);
 }
 
-/**
- * shouldIgnore:
- *   Checks if a given file or folder path should be ignored,
- *   based on the patterns in ignore.json.
- */
+/** should this path be ignored?                                         */
 function shouldIgnore(filePath, isFolder = false) {
-  const folderSeparator = filePath.includes('/') ? '/' : '\\';
-  const fileOrFolderName = filePath.split(folderSeparator).at(-1);
+  const name             = path.basename(filePath);
   const { folders, files } = ignoreConfig;
 
-  if (isFolder) {
-    return folders.some(folderPattern =>
-      folderPattern === fileOrFolderName || matchWildcard(fileOrFolderName, folderPattern)
-    );
-  } else {
-    return files.some(filePattern =>
-      filePattern === fileOrFolderName || matchWildcard(fileOrFolderName, filePattern)
-    );
-  }
+  return isFolder
+    ? folders.some((pat) => name === pat || matchWildcard(name, pat))
+    : files  .some((pat) => name === pat || matchWildcard(name, pat));
 }
 
-/**
- * countFiles:
- *   Recursively counts files in a folder (ignoring any that match ignore.json).
- *   If the total count surpasses MAX_FILES, returns Infinity.
- */
+/** count files recursively, abort early after MAX_FILES                  */
 function countFiles(folderPath) {
   let count = 0;
-  const files = fs.readdirSync(folderPath);
-  for (let file of files) {
-    const filePath = path.join(folderPath, file);
-    const stats = fs.statSync(filePath);
-    if (stats.isFile() && !shouldIgnore(filePath, true)) {
+  for (const entry of fs.readdirSync(folderPath)) {
+    const fp   = path.join(folderPath, entry);
+    const stat = fs.statSync(fp);
+
+    if (stat.isFile() && !shouldIgnore(fp)) {
       count++;
-    } else if (stats.isDirectory() && !shouldIgnore(filePath, true)) {
-      count += countFiles(filePath);
+    } else if (stat.isDirectory() && !shouldIgnore(fp, true)) {
+      count += countFiles(fp);
     }
-    if (count > MAX_FILES) {
-      return Infinity;
-    }
+    if (count > MAX_FILES) return Infinity;
   }
   return count;
 }
 
-/**
- * getCommentHeader:
- *   Returns a comment-style header based on file extension. It now includes a case for
- *   `-- File:` (commonly used in SQL or other contexts).
- *
- *   You can modify which file extensions use this new `-- File:` marker or make it default
- *   for certain scenarios. For example, if ext is '.sql', we use `-- File: ...`.
- *   Otherwise, we use the existing logic for .json, .css, .js, etc.
- */
-function getCommentHeader(relativePath) {
-  const ext = path.extname(relativePath).toLowerCase();
+/* ----------------------------- HEADER UTILS ----------------------------- */
 
-  // Example: use `-- File:` for SQL files
-  if (ext === '.sql') {
-    return `-- File: ${relativePath}\n`;
-  }
+/** language-appropriate comment for “File: …”                             */
+function getCommentHeader(rel) {
+  const ext = path.extname(rel).toLowerCase();
+  const m   = {
+    slashes : [".js", ".ts", ".jsx", ".tsx", ".java", ".c", ".cpp", ".h"],
+    blocks  : [".css", ".scss", ".sass", ".less"],
+    hash    : [".py", ".sh", ".rb", ".ps1"],
+    html    : [".html", ".htm", ".vue", ".svelte"],
+    sql     : [".sql"],
+    lua     : [".lua"]
+  };
 
-  // .json => line-style comment (// File:)
-  if (ext === '.json') {
-    return `// File: ${relativePath}\n`;
-  }
+  if (m.slashes.includes(ext)) return `// File: ${rel}\n`;
+  if (m.blocks .includes(ext)) return `/* File: ${rel} */\n`;
+  if (m.hash   .includes(ext)) return `# File: ${rel}\n`;
+  if (m.html   .includes(ext)) return `<!-- File: ${rel} -->\n`;
+  if (m.sql    .includes(ext)) return `-- File: ${rel}\n`;
+  if (m.lua    .includes(ext)) return `-- File: ${rel}\n`;
 
-  const blockCommentExts = ['.css', '.scss', '.sass'];
-  const slashLike = ['.js', '.ts', '.java', '.jsx', '.tsx'];
-
-  if (blockCommentExts.includes(ext)) {
-    return `/* File: ${relativePath} */\n`;
-  } else if (slashLike.includes(ext)) {
-    return `// File: ${relativePath}\n`;
-  } else {
-    // Fallback to line-style or you can choose `-- File:` here if you want
-    return `// File: ${relativePath}\n`;
-  }
+  // default
+  return `// File: ${rel}\n`;
 }
 
-/**
- * alreadyHasHeader:
- *   Returns true if the file's first line starts with "// File:", "/* File:", or "-- File:".
- */
+/** does the *first* non-blank line already contain a recognisable header? */
 function alreadyHasHeader(content) {
-  const [firstLine] = content.split(/\r?\n/);
-  if (!firstLine) return false;
-
-  const trimmed = firstLine.trimStart();
-  return (
-    trimmed.startsWith('// File:') ||
-    trimmed.startsWith('/* File:') ||
-    trimmed.startsWith('-- File:')
-  );
+  const first = content.split(/\r?\n/).find((l) => l.trim() !== "") || "";
+  const cleaned = removeChatGPTArtifacts(first).trimStart();
+  return /^(?:\/\/|\/\*|#|<!--|--)\s*File:/i.test(cleaned);
 }
 
-/**
- * processFolder:
- *   Recursively reads `folderPath`, ignoring files per ignore.json,
- *   and writes their contents into `outputPath`. Each file has a one-line
- *   comment header indicating the path, unless it already starts with that header.
- */
-function processFolder({ folderPath, outputPath, lang = 'en' }) {
-  const filesCount = countFiles(folderPath);
-  if (filesCount > MAX_FILES) {
-    console.log(`(${filesCount}) ${i18n[lang]['The number of files exceeds the limit of']} ${MAX_FILES}`);
+/** quick check for the JS-style header specifically                       */
+function alreadyHasJsHeader(content) {
+  const first = content.split(/\r?\n/).find((l) => l.trim() !== "") || "";
+  const cleaned = removeChatGPTArtifacts(first).trimStart();
+  return cleaned.startsWith("// File:");
+}
+
+/* --------------------------- SANITISATION --------------------------- */
+
+/** strip BOM, zero-width spaces, curly quotes, ``` fences,                *
+ *  and normalise line endings to LF                                       */
+function removeChatGPTArtifacts(src) {
+  let s = src
+    // BOM & zero-width chars
+    .replace(/^\uFEFF/, "")
+    .replace(/[\u200B-\u200D\u2060]+/g, "")
+
+    // fancy quotes → normal quotes
+    .replace(/[“”]/g, '"')
+    .replace(/[‘’]/g, "'");
+
+  return s;
+}
+
+/** unwrap ``` fences if the whole file was pasted verbatim                */
+function stripCodeFences(src) {
+  const trimmed = src.trim();
+  if (!trimmed.startsWith("```")) return src;          // nothing to do
+
+  const lines = trimmed.split(/\r?\n/);
+  // first line is ``` or ```lang
+  lines.shift();
+  // last line is ```
+  if (lines[lines.length - 1].startsWith("```")) lines.pop();
+
+  return lines.join("\n");
+}
+
+/* ------------------------------------------------------------------ */
+/*  Core                                                               */
+/* ------------------------------------------------------------------ */
+function processFolder({ folderPath, outputPath, lang = "en" }) {
+  const total = countFiles(folderPath);
+
+  if (total > MAX_FILES) {
+    console.log(`(${total}) ${i18n[lang]["The number of files exceeds the limit of"]} ${MAX_FILES}`);
     return;
   }
 
-  // Create directories for outputPath if needed
-  const outputDir = path.dirname(outputPath);
-  fs.mkdirSync(outputDir, { recursive: true });
+  // ensure parent dir exists
+  fs.mkdirSync(path.dirname(outputPath), { recursive: true });
 
-  console.log(`${i18n[lang]['Starting writing output file']} ${outputPath}`);
-  const output = fs.createWriteStream(outputPath);
+  console.log(`${i18n[lang]["Starting writing output file"]} ${outputPath}`);
+  const out = fs.createWriteStream(outputPath, { encoding: "utf8" });
 
-  function processFile(filePath) {
-    console.log(`${i18n[lang]['Writing file']} ${filePath}`);
-    const relativePath = path.relative(process.cwd(), filePath);
-    const fileContents = fs.readFileSync(filePath, 'utf-8');
+  const writeFile = (absPath) => {
+    console.log(`${i18n[lang]["Writing file"]} ${absPath}`);
 
-    if (!alreadyHasHeader(fileContents)) {
-      output.write(getCommentHeader(relativePath));
+    const rel   = path.relative(CWD, absPath);
+    const raw   = fs.readFileSync(absPath, "utf8");
+    const clean = stripCodeFences(removeChatGPTArtifacts(raw));
+
+    const ext = path.extname(absPath).toLowerCase();
+
+    if (ext === ".js") {
+      if (!alreadyHasJsHeader(clean)) out.write(getCommentHeader(rel));
+      out.write(clean.replace(/\r\n/g, "\n"));
+    } else {
+      if (!alreadyHasHeader(clean))   out.write(getCommentHeader(rel));
+      out.write(clean.replace(/\r\n/g, "\n"));
     }
-    output.write(fileContents);
-    output.write('\n'); // separate files
-  }
 
-  function processFolderRecursive(folderPath) {
-    const files = fs.readdirSync(folderPath);
-    files.forEach(file => {
-      const filePath = path.join(folderPath, file);
-      const stats = fs.statSync(filePath);
-      if (stats.isFile() && !shouldIgnore(filePath)) {
-        processFile(filePath);
-      } else if (stats.isDirectory() && !shouldIgnore(filePath, true)) {
-        processFolderRecursive(filePath);
-      }
-    });
-  }
+    out.write("\n\n"); // spacer between files
+  };
 
-  processFolderRecursive(folderPath);
-  output.end();
-  console.log(`${i18n[lang]['Finished writing output file']} ${outputPath}`);
+  (function walk(dir) {
+    for (const entry of fs.readdirSync(dir)) {
+      const abs = path.join(dir, entry);
+      const st  = fs.statSync(abs);
+
+      if (st.isFile() && !shouldIgnore(abs))          writeFile(abs);
+      else if (st.isDirectory() && !shouldIgnore(abs, true)) walk(abs);
+    }
+  })(folderPath);
+
+  out.end();
+  console.log(`${i18n[lang]["Finished writing output file"]} ${outputPath}`);
 }
 
-// CLI args
-if (process.argv.length < 3) {
-  console.log(`${i18n['en']['Usage']}`);
+/* ------------------------------------------------------------------ */
+/*  CLI                                                                */
+/* ------------------------------------------------------------------ */
+const args = process.argv.slice(2)
+  .reduce((acc, cur) => {
+    const [k, v] = cur.split("=");
+    if (k && v) acc[k] = v;
+    return acc;
+  }, {});
+
+if (!args.folder || !args.output) {
+  console.error(i18n.en.Usage);
   process.exit(1);
 }
 
-const folderPath = process.argv.find(arg => arg.startsWith('folder=')).split('=')[1];
-const outputPath = process.argv.find(arg => arg.startsWith('output=')).split('=')[1];
-const lang = process.argv.find(arg => arg.startsWith('lang='))?.split('=')[1];
-
-processFolder({ folderPath, outputPath, lang });
+processFolder({
+  folderPath : path.resolve(CWD, args.folder),
+  outputPath : path.resolve(CWD, args.output),
+  lang       : args.lang || "en"
+});
