@@ -1,90 +1,105 @@
-#!/usr/bin/env node
+// File: stripUnwantedComments.js
+/* eslint-env node */
+"use strict";
 
-/**
- * stripUnwantedComments.js
- *
- * USAGE:
- *   node stripUnwantedComments.js inputFile.txt outputFile.txt
- *
- * DESCRIPTION:
- *   Reads 'inputFile.txt' line-by-line and writes to 'outputFile.txt',
- *   removing comments that don't match our recognized file separators:
- *      // File: ...
- *      /* File: ... */
- *      -- File: ...
- *   Also trims extra whitespace and collapses multiple blank lines.
- */
+const fs   = require("fs");
+const path = require("path");
 
-const fs = require('fs');
-const path = require('path');
-
-// Regexes that match recognized file-separator lines.
-const recognizedSeparators = [
-  /^\s*\/\/\s*File:\s*\S+/,
-  /^\s*\/\*\s*File:\s*\S+.*\*\/\s*$/,
-  /^\s*--\s*File:\s*\S+/
-];
-
-// Helper to check if a line is a recognized file-separator line:
-function isRecognizedSeparator(line) {
-  return recognizedSeparators.some(regex => regex.test(line));
+/* ─────────────────────────────────────────────────────────────── */
+/*   Utility: Clean up ChatGPT artefacts                           */
+/* ─────────────────────────────────────────────────────────────── */
+function cleanArtifacts(text) {
+  return text
+    // Strip BOM
+    .replace(/^\uFEFF/, "")
+    // Remove zero-width chars
+    .replace(/[\u200B-\u200D\u2060]+/g, "")
+    // Replace curly quotes
+    .replace(/[“”]/g, '"')
+    .replace(/[‘’]/g, "'");
 }
 
-// Helper to check if a line is any comment line (//, /*, --)
+/** Remove wrapping ``` fences (if the *whole* file is fenced) */
+function stripCodeFence(text) {
+  const trimmed = text.trim();
+  if (!trimmed.startsWith("```")) return text;
+
+  const lines = trimmed.split(/\r?\n/);
+  // drop the opening line (``` or ```lang)
+  lines.shift();
+  // drop the last ```` line if present
+  if (lines.length && /^```/.test(lines[lines.length - 1].trim())) lines.pop();
+  return lines.join("\n");
+}
+
+/* ─────────────────────────────────────────────────────────────── */
+/*   Regexes                                                       */
+/* ─────────────────────────────────────────────────────────────── */
+const recognizedSeparators = [
+  /^\s*\/\/\s*File:\s*\S+/,             // // File:
+  /^\s*\/\*\s*File:\s*\S+.*\*\/\s*$/,   // /* File: … */
+  /^\s*--\s*File:\s*\S+/,               // -- File:
+  /^\s*#\s*File:\s*\S+/,                // # File:
+  /^\s*<!--\s*File:\s*\S+.*-->\s*$/     // <!-- File: … -->
+];
+
+function isRecognizedSeparator(line) {
+  return recognizedSeparators.some((re) => re.test(line));
+}
+
+/** Detect *any* comment prefix we care about                       */
 function isCommentLine(line) {
-  const trimmed = line.trimStart();
+  const t = line.trimStart();
   return (
-    trimmed.startsWith('//') ||
-    trimmed.startsWith('/*') ||
-    trimmed.startsWith('--')
+    t.startsWith("//")  ||
+    t.startsWith("/*")  ||
+    t.startsWith("--")  ||
+    t.startsWith("#")   ||
+    t.startsWith("<!--")
   );
 }
 
-// Main script
+/* ─────────────────────────────────────────────────────────────── */
+/*   Core                                                          */
+/* ─────────────────────────────────────────────────────────────── */
 function stripUnwantedComments(inputFile, outputFile) {
-  const content = fs.readFileSync(inputFile, 'utf-8');
-  let lines = content.split(/\r?\n/);
+  let content = fs.readFileSync(inputFile, "utf8");
+  content     = stripCodeFence(cleanArtifacts(content))
+                // normalise CRLF → LF
+                .replace(/\r\n/g, "\n");
 
-  const filteredLines = [];
-  let blankCount = 0; // track consecutive blank lines
+  const lines        = content.split("\n");
+  const resultLines  = [];
+  let   blankStreak  = 0;
 
-  for (let line of lines) {
-    // If it's a comment line but not recognized, skip it
-    if (isCommentLine(line) && !isRecognizedSeparator(line)) {
-      continue;
-    }
+  for (let ln of lines) {
+    // ignore comment lines that are *not* recognised separators
+    if (isCommentLine(ln) && !isRecognizedSeparator(ln)) continue;
 
-    // Trim leading & trailing whitespace
-    let trimmedLine = line.trim();
+    const trimmed = ln.trim();
 
-    // If the line is empty, track how many blank lines we've seen consecutively
-    if (!trimmedLine) {
-      blankCount++;
-      // Only keep the first blank line, skip subsequent
-      if (blankCount > 1) {
-        continue;
-      }
+    if (trimmed === "") {
+      blankStreak++;
+      if (blankStreak > 1) continue;   // skip extra blanks
     } else {
-      // reset the blank line counter since we have content
-      blankCount = 0;
+      blankStreak = 0;
     }
-
-    // Keep the line
-    filteredLines.push(trimmedLine);
+    resultLines.push(trimmed);
   }
 
-  // Join everything with a single newline
-  const finalOutput = filteredLines.join('\n');
-  fs.writeFileSync(outputFile, finalOutput, 'utf-8');
+  // Ensure file ends with a single newline
+  const output = resultLines.join("\n") + "\n";
+  fs.writeFileSync(outputFile, output, "utf8");
   console.log(`Done! Wrote cleaned content to ${outputFile}`);
 }
 
-// CLI usage
+/* ─────────────────────────────────────────────────────────────── */
+/*   CLI                                                           */
+/* ─────────────────────────────────────────────────────────────── */
 if (process.argv.length < 4) {
-  console.log('Usage: node stripUnwantedComments.js <inputFile> <outputFile>');
+  console.error("Usage: node stripUnwantedComments.js <inputFile> <outputFile>");
   process.exit(1);
 }
 
-const inputFile = path.resolve(process.cwd(), process.argv[2]);
-const outputFile = path.resolve(process.cwd(), process.argv[3]);
+const [inputFile, outputFile] = process.argv.slice(2).map((p) => path.resolve(process.cwd(), p));
 stripUnwantedComments(inputFile, outputFile);
