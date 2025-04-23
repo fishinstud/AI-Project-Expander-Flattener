@@ -1,114 +1,128 @@
-const fs = require('fs');
-const path = require('path');
+// File: restoreFolderStructure.js
+/* eslint-env node */
+"use strict";
 
-let restoredFileCount = 0;
-let startTime;
-let endTime;
+const fs   = require("fs");
+const path = require("path");
 
+/* ──────────────────────────────────────────────────────────────── */
+/*   Perf counters                                                 */
+/* ──────────────────────────────────────────────────────────────── */
+let restoredCount = 0;
+let startHR;
 
-function parseFileHeader(line) {
-  const trimmedLine = line.trimEnd();
+/* ──────────────────────────────────────────────────────────────── */
+/*   ChatGPT-artefact cleanup                                       */
+/* ──────────────────────────────────────────────────────────────── */
+function removeArtifacts(str) {
+  return str
+    .replace(/^\uFEFF/, "")                 // BOM
+    .replace(/[\u200B-\u200D\u2060]+/g, "") // zero-width chars
+    .replace(/[“”]/g, '"')                  // curly quotes
+    .replace(/[‘’]/g, "'");
+}
 
-  // Regex for block-style:  /* File: <path> */
-  const blockCommentRegex = /^\s*\/\*\s*File:\s*(.*?)\s*\*\/\s*$/;
-  // Regex for line-style:   // File: <path>
-  const lineCommentRegex  = /^\s*\/\/\s*File:\s*(.*?)\s*$/;
-  // Regex for dash-style:   -- File: <path>
-  const dashCommentRegex  = /^\s*--\s*File:\s*(.*?)\s*$/;
+/* ──────────────────────────────────────────────────────────────── */
+/*   Detect “File:” headers (all common comment styles)            */
+/* ──────────────────────────────────────────────────────────────── */
+const HEADER_REGEXES = [
+  /^\s*\/\/\s*File:\s*(.*?)\s*$/,             // // File: …
+  /^\s*\/\*\s*File:\s*(.*?)\s*\*\/\s*$/,      // /* File: … */
+  /^\s*#\s*File:\s*(.*?)\s*$/,                // # File: …
+  /^\s*<!--\s*File:\s*(.*?)\s*-->\s*$/,       // <!-- File: … -->
+  /^\s*--\s*File:\s*(.*?)\s*$/                // -- File: …
+];
 
-  let match = trimmedLine.match(blockCommentRegex);
-  if (match) {
-    return match[1].trim();
-  }
-  match = trimmedLine.match(lineCommentRegex);
-  if (match) {
-    return match[1].trim();
-  }
-  match = trimmedLine.match(dashCommentRegex);
-  if (match) {
-    return match[1].trim();
+function parseFileHeader(rawLine) {
+  const line = removeArtifacts(rawLine.trimEnd());
+  for (const re of HEADER_REGEXES) {
+    const m = line.match(re);
+    if (m) return m[1].trim();
   }
   return null;
 }
 
-/**
- * sanitizePath:
- *   Removes leading slashes or drive letters so we don't attempt to create
- *   directories at the root. e.g. "/home/APEF/client/package.json" => "home/APEF/client/package.json"
- */
-function sanitizePath(filePath) {
-  return filePath.replace(/^([A-Za-z]:)?[\\/]+/, '');
+/* ──────────────────────────────────────────────────────────────── */
+/*   Path helpers                                                  */
+/* ──────────────────────────────────────────────────────────────── */
+function sanitizePath(p) {
+  /* kill leading slashes / drive letters → avoid writing at FS root */
+  return p.replace(/^([A-Za-z]:)?[\\/]+/, "");
 }
 
-/**
- * processOutputFile:
- *   Reads lines from the aggregated text file, uses parseFileHeader to detect boundaries,
- *   writes each file under "restored-data".  If it's a .json file, we remove the first line
- *   (the header) for pure JSON.  Also prints how many files were restored and total time.
- */
-function processOutputFile(inputFilePath) {
-  startTime = process.hrtime.bigint();
+/* write a single file under restoreRoot */
+function writeFile(restoreRoot, relPath, lines) {
+  const sanitized = sanitizePath(relPath);
+  if (!sanitized) return;
 
-  const inputAbsolutePath = path.resolve(process.cwd(), inputFilePath);
-  const baseDir = path.dirname(inputAbsolutePath);
-  const restoreRoot = path.join(baseDir, 'restored-data');
+  const dest = path.join(restoreRoot, sanitized);
+  fs.mkdirSync(path.dirname(dest), { recursive: true });
 
-  fs.mkdirSync(restoreRoot, { recursive: true });
-
-  const lines = fs.readFileSync(inputAbsolutePath, 'utf-8').split(/\r?\n/);
-
-  let currentFileHeaderPath = null;
-  let currentFileLines = [];
-
-  function writeCurrentFile() {
-    if (currentFileHeaderPath && currentFileLines.length > 0) {
-      const sanitized = sanitizePath(currentFileHeaderPath);
-      if (!sanitized) return;
-
-      const fullFilePath = path.join(restoreRoot, sanitized);
-      const dirPath = path.dirname(fullFilePath);
-
-      fs.mkdirSync(dirPath, { recursive: true });
-
-      // If it's a .json file, remove the first line (the header comment).
-      if (path.extname(sanitized).toLowerCase() === '.json') {
-        currentFileLines.shift();
-      }
-
-      fs.writeFileSync(fullFilePath, currentFileLines.join('\n'), 'utf-8');
-      restoredFileCount++;
-    }
+  /* Drop the header for pure-JSON files */
+  if (path.extname(sanitized).toLowerCase() === ".json") {
+    lines.shift();
   }
 
-  for (const line of lines) {
-    const maybePath = parseFileHeader(line);
-
-    if (maybePath !== null) {
-      // Found a new file => finalize the previous file
-      writeCurrentFile();
-
-      currentFileHeaderPath = maybePath;
-      currentFileLines = [line]; // keep the comment line
-    } else {
-      if (currentFileHeaderPath) {
-        currentFileLines.push(line);
-      }
-    }
-  }
-
-  // Final file
-  writeCurrentFile();
-
-  endTime = process.hrtime.bigint();
-  const elapsedSeconds = Number(endTime - startTime) / 1e9;
-  console.log(`Restored ${restoredFileCount} files in ${elapsedSeconds.toFixed(4)} seconds.`);
+  fs.writeFileSync(dest, lines.join("\n"), "utf8");
+  restoredCount++;
 }
 
-// CLI usage
-if (process.argv.length < 3) {
-  console.log("Usage: node restoreFolderStructure.js <output file path>");
+/* ──────────────────────────────────────────────────────────────── */
+/*   Core routine                                                  */
+/* ──────────────────────────────────────────────────────────────── */
+function restoreStructure(aggregatedTxt) {
+  startHR = process.hrtime.bigint();
+
+  const inputAbs   = path.resolve(process.cwd(), aggregatedTxt);
+  const restoreDir = path.join(path.dirname(inputAbs), "restored-data");
+  fs.mkdirSync(restoreDir, { recursive: true });
+
+  const lines = fs.readFileSync(inputAbs, "utf8").split(/\r?\n/);
+
+  let inFence              = false; // ````fence```
+  let currentHeader        = null;
+  let currentFileContents  = [];
+
+  const flush = () => {
+    if (currentHeader) {
+      writeFile(restoreDir, currentHeader, currentFileContents);
+    }
+    currentHeader       = null;
+    currentFileContents = [];
+  };
+
+  for (const rawLine of lines) {
+    const trimmed = rawLine.trim();
+
+    /* toggle & skip triple-back-tick fences */
+    if (/^```/.test(trimmed)) {
+      inFence = !inFence;
+      continue;
+    }
+    if (inFence) continue;                       // ignore outside-snippet cruft
+
+    const maybeHeader = parseFileHeader(rawLine);
+
+    if (maybeHeader !== null) {
+      flush();                                   // finish previous
+      currentHeader        = maybeHeader;
+      currentFileContents  = [rawLine];          // keep the comment line
+    } else if (currentHeader) {
+      currentFileContents.push(rawLine);
+    }
+  }
+  flush();                                       // final file
+
+  const seconds = Number(process.hrtime.bigint() - startHR) / 1e9;
+  console.log(`Restored ${restoredCount} files in ${seconds.toFixed(4)} s → ${restoreDir}`);
+}
+
+/* ──────────────────────────────────────────────────────────────── */
+/*   CLI                                                            */
+/* ──────────────────────────────────────────────────────────────── */
+if (process.argv.length < 2 + 1) {
+  console.error("Usage: node restoreFolderStructure.js <aggregated.txt>");
   process.exit(1);
 }
 
-const inputFilePath = process.argv[2];
-processOutputFile(inputFilePath);
+restoreStructure(process.argv[2]);
